@@ -1,0 +1,87 @@
+name: PS4 USB HID build
+
+on:
+  push:
+    branches:
+      - ps4-usb-hid-build
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout holder repo
+        uses: actions/checkout@v4
+
+      - name: Checkout usb_hid source
+        uses: actions/checkout@v4
+        with:
+          repository: jocover/GoldHEN_Plugins_Repository-1
+          ref: usb_hid
+          path: source
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Checkout GoldHEN plugin SDK
+        uses: actions/checkout@v4
+        with:
+          repository: GoldHEN/GoldHEN_Plugins_SDK
+          path: source/SDK
+
+      - name: Checkout mxml
+        uses: actions/checkout@v4
+        with:
+          repository: illusion0001/mxml
+          ref: patch-1
+          path: source/mxml
+
+      - name: Setup variables
+        shell: bash
+        run: |
+          echo "OO_PS4_TOOLCHAIN=$GITHUB_WORKSPACE/source/OpenOrbis/PS4Toolchain" >> "$GITHUB_ENV"
+          echo "GOLDHEN_SDK=$GITHUB_WORKSPACE/source/SDK" >> "$GITHUB_ENV"
+
+      - name: Download OpenOrbis Toolchain
+        working-directory: source
+        shell: bash
+        run: |
+          curl -fL https://github.com/illusion0001/OpenOrbis-PS4-Toolchain/releases/download/0.0.1.416/toolchain.tar.gz | tar xz -C ./
+
+      - name: Install LLVM 12
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "12.0"
+
+      - name: Install mini-xml
+        working-directory: source/mxml/ps4
+        shell: bash
+        run: |
+          wget -q https://raw.githubusercontent.com/bucanero/oosdk_libraries/master/build_rules.mk -O "$OO_PS4_TOOLCHAIN/build_rules.mk"
+          make install PRX_BUILD=1
+
+      - name: Build release PRX
+        working-directory: source
+        shell: bash
+        run: make LOG=PRINTF
+
+      - name: Show gamepad helper outputs
+        working-directory: source
+        shell: bash
+        run: |
+          find bin -type f -iname '*gamepad*' -o -iname '*.prx' | sort
+
+      - name: Collect gamepad_helper
+        working-directory: source
+        shell: bash
+        run: |
+          mkdir -p package
+          find bin/plugins/prx_final -maxdepth 1 -type f -name 'gamepad_helper.prx' -exec cp {} package/ \;
+          test -f package/gamepad_helper.prx
+          sha256sum package/gamepad_helper.prx | tee package/sha256.txt
+
+      - name: Upload gamepad_helper artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gamepad_helper-usb_hid
+          path: source/package/
+          if-no-files-found: error
