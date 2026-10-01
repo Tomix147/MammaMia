@@ -1,0 +1,212 @@
+name: PS4 USB HID diagnostic build
+
+on:
+  push:
+    branches:
+      - ps4-usb-hid-build
+  workflow_dispatch:
+
+jobs:
+  build_diag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout holder repo
+        uses: actions/checkout@v4
+
+      - name: Checkout usb_hid source
+        uses: actions/checkout@v4
+        with:
+          repository: jocover/GoldHEN_Plugins_Repository-1
+          ref: usb_hid
+          path: source
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Checkout GoldHEN plugin SDK
+        uses: actions/checkout@v4
+        with:
+          repository: GoldHEN/GoldHEN_Plugins_SDK
+          path: source/SDK
+
+      - name: Checkout mxml
+        uses: actions/checkout@v4
+        with:
+          repository: illusion0001/mxml
+          ref: patch-1
+          path: source/mxml
+
+      - name: Add runtime USB diagnostics
+        working-directory: source
+        shell: python
+        run: |
+          from pathlib import Path
+
+          p = Path("plugin_src/gamepad_helper/source/usb_hid.c")
+          s = p.read_text()
+
+          s = s.replace(
+              '#include <stdlib.h>\n',
+              '#include <stdlib.h>\n#include <stdarg.h>\n'
+          )
+
+          marker = '#include "usb_hid.h"\n'
+          helper = r'''
+static void usb_diag(const char* fmt, ...) {
+    FILE* f = fopen("/data/GoldHEN/usb_hid_diag.txt", "a");
+    if (!f) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fclose(f);
+}
+'''
+          s = s.replace(marker, marker + helper, 1)
+
+          s = s.replace(
+              '            printf("device:%s\\n", xpad_device_list[i].name);\n            return 1;',
+              '            printf("device:%s\\n", xpad_device_list[i].name);\n'
+              '            usb_diag("MATCH %04x:%04x %s xtype=%u\\n", desc->idVendor, desc->idProduct, xpad_device_list[i].name, device->xtype);\n'
+              '            return 1;',
+              1
+          )
+
+          s = s.replace(
+              '    int count = sceUsbdGetDeviceList(&list);\n',
+              '    int count = sceUsbdGetDeviceList(&list);\n'
+              '    usb_diag("sceUsbdInit ret=%d; device_count=%d\\n", ret, count);\n',
+              1
+          )
+
+          s = s.replace(
+              '        ret = sceUsbdGetDeviceDescriptor(list[i], &desc);\n\n        if (xpad_probe(&desc, device)) {',
+              '        ret = sceUsbdGetDeviceDescriptor(list[i], &desc);\n'
+              '        usb_diag("USB[%d] desc_ret=%d VID:PID=%04x:%04x class=%02x sub=%02x proto=%02x\\n", i, ret, desc.idVendor, desc.idProduct, desc.bDeviceClass, desc.bDeviceSubClass, desc.bDeviceProtocol);\n\n'
+              '        if (xpad_probe(&desc, device)) {',
+              1
+          )
+
+          s = s.replace(
+              '    if (!found) {\n        printf("not found xpad device\\n");\n        return -1;\n    }',
+              '    if (!found) {\n        printf("not found xpad device\\n");\n        usb_diag("RESULT: no xpad VID/PID matched\\n");\n        return -1;\n    }',
+              1
+          )
+
+          s = s.replace(
+              '    device->handle = sceUsbdOpenDeviceWithVidPid(device->idVendor, device->idProduct);\n',
+              '    device->handle = sceUsbdOpenDeviceWithVidPid(device->idVendor, device->idProduct);\n'
+              '    usb_diag("open %04x:%04x handle=%p\\n", device->idVendor, device->idProduct, device->handle);\n',
+              1
+          )
+
+          s = s.replace(
+              '            const struct libusb_interface_descriptor* intf_desc = &intf->altsetting[k];\n            if (should_enumerate_interface(device->idVendor, intf_desc)) {',
+              '            const struct libusb_interface_descriptor* intf_desc = &intf->altsetting[k];\n'
+              '            usb_diag("IF %d alt=%d num=%d class=%02x sub=%02x proto=%02x eps=%u\\n", j, k, intf_desc->bInterfaceNumber, intf_desc->bInterfaceClass, intf_desc->bInterfaceSubClass, intf_desc->bInterfaceProtocol, intf_desc->bNumEndpoints);\n'
+              '            if (should_enumerate_interface(device->idVendor, intf_desc)) {',
+              1
+          )
+
+          s = s.replace(
+              '                good_open = initialize_device(device, intf_desc, conf_desc);\n',
+              '                good_open = initialize_device(device, intf_desc, conf_desc);\n'
+              '                usb_diag("initialize_device => %d in_ep=%02x out_ep=%02x maxpkt=%d\\n", good_open, device->input_endpoint, device->output_endpoint, device->input_ep_max_packet_size);\n',
+              1
+          )
+
+          s = s.replace(
+              '                usb_hid_write(device, odata, init_packet->len);\n',
+              '                int wr = usb_hid_write(device, odata, init_packet->len);\n'
+              '                usb_diag("GIP init len=%u cmd=%02x write_ret=%d\\n", init_packet->len, odata[0], wr);\n',
+              1
+          )
+
+          s = s.replace(
+              '        return 0;\n    } else {\n        return -1;\n    }\n}',
+              '        usb_diag("RESULT: usb_hid_init SUCCESS xtype=%u\\n", device->xtype);\n'
+              '        return 0;\n    } else {\n'
+              '        usb_diag("RESULT: interface initialization FAILED\\n");\n'
+              '        return -1;\n    }\n}',
+              1
+          )
+
+          p.write_text(s)
+
+          p = Path("plugin_src/gamepad_helper/source/main.c")
+          s = p.read_text()
+          old = '''    if (g_enableUSBHid) {
+        if (usb_hid_init(g_hidDevice)) {
+            final_printf("usb hid init faile");
+            g_enableUSBHid = false;
+        }
+    }
+'''
+          new = '''    {
+        FILE* f = fopen("/data/GoldHEN/usb_hid_diag.txt", "w");
+        if (f) {
+            fprintf(f, "gamepad_helper diagnostic build\\nTitleID=%s\\nenableUSBHid=%d\\n", procInfo.titleid, g_enableUSBHid ? 1 : 0);
+            fclose(f);
+        }
+    }
+
+    if (g_enableUSBHid) {
+        int usbret = usb_hid_init(g_hidDevice);
+        FILE* f = fopen("/data/GoldHEN/usb_hid_diag.txt", "a");
+        if (f) {
+            fprintf(f, "usb_hid_init returned %d\\n", usbret);
+            fclose(f);
+        }
+        if (usbret) {
+            final_printf("usb hid init faile");
+            g_enableUSBHid = false;
+        }
+    }
+'''
+          if old not in s:
+              raise SystemExit("main.c patch anchor not found")
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+
+      - name: Setup variables
+        shell: bash
+        run: |
+          echo "OO_PS4_TOOLCHAIN=$GITHUB_WORKSPACE/source/OpenOrbis/PS4Toolchain" >> "$GITHUB_ENV"
+          echo "GOLDHEN_SDK=$GITHUB_WORKSPACE/source/SDK" >> "$GITHUB_ENV"
+
+      - name: Download OpenOrbis Toolchain
+        working-directory: source
+        shell: bash
+        run: |
+          curl -fL https://github.com/illusion0001/OpenOrbis-PS4-Toolchain/releases/download/0.0.1.416/toolchain.tar.gz | tar xz -C ./
+
+      - name: Install LLVM 12
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "12.0"
+
+      - name: Install mini-xml
+        working-directory: source/mxml/ps4
+        shell: bash
+        run: |
+          wget -q https://raw.githubusercontent.com/bucanero/oosdk_libraries/master/build_rules.mk -O "$OO_PS4_TOOLCHAIN/build_rules.mk"
+          make install PRX_BUILD=1
+
+      - name: Build diagnostic PRX
+        working-directory: source
+        shell: bash
+        run: make LOG=PRINTF
+
+      - name: Collect diagnostic plugin
+        working-directory: source
+        shell: bash
+        run: |
+          mkdir -p package
+          cp bin/plugins/prx_final/gamepad_helper.prx package/gamepad_helper_diag.prx
+          sha256sum package/gamepad_helper_diag.prx | tee package/sha256.txt
+
+      - name: Upload diagnostic artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gamepad_helper-usb_hid-diag
+          path: source/package/
+          if-no-files-found: error
